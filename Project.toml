@@ -1,0 +1,5 @@
+[deps]
+Combinatorics = "861a8166-3701-5b0c-9a16-15d98fcdc6aa"
+IndexableBitVectors = "1cb3b9ac-1ffd-5777-9e6b-a3d42300664d"
+IntArrays = "45d23951-e9a5-545c-8049-e4c4887f5525"
+SuffixArrays = "24f65c1e-0a10-5d3d-8a1f-a83399f3fced"

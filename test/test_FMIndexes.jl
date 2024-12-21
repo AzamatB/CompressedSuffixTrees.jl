@@ -14,6 +14,8 @@ Base.getindex(seq::DNASeq, i::Integer) = seq.data[i]
 Base.length(seq::DNASeq) = length(seq.data)
 Base.lastindex(seq::DNASeq) = length(seq.data)
 Base.convert(::Type{UInt8}, x::Nuc) = UInt8(x)
+Base.convert(::Type{UInt16}, x::Nuc) = UInt16(x)
+Base.convert(::Type{UInt}, x::Nuc) = UInt(x)
 
 @testset "construct" begin
     @testset "one" begin
@@ -63,7 +65,7 @@ Base.convert(::Type{UInt8}, x::Nuc) = UInt8(x)
     @testset "mmap" begin
         σ = 4
         seq = rand(0x00:0x03, 2^10)
-        index = FMIndex(seq, σ, mmap=true)
+        index = FMIndex(seq, σ)
         @test typeof(index) == FMIndex{2,UInt16}
     end
 
@@ -270,7 +272,7 @@ end
 
     text = read(joinpath(dirname(@__FILE__), "lorem_ipsum.txt"))
     textstr = String(copy(text))
-    index = FMIndex(textstr, r=2)
+    index = FMIndex(textstr)
     @test count("Lorem", index) == 1
     @test locateall("Lorem", index) == [1]
     @test count("hoge", index) == 0
@@ -285,5 +287,5 @@ end
         @test locateall(query, index) |> sort == locs
     end
 
-    @test String(restore(index)) == String(text)
+    @test String(UInt8.(restore(index))) == String(text)
 end

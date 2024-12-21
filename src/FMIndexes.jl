@@ -19,82 +19,54 @@ Type parameters:
 * `T`: the type to represent positions of a sequence
 """
 struct FMIndex{W,T}
-    bwt::WaveletMatrix{W,UInt,SucVector}
+    bwt::WaveletMatrix{W,UInt16,SucVector}
     sentinel::Int
-    samples::Vector{T}
-    sampled::SucVector
+    suffixes::Vector{T}
     count::Vector{Int}
 end
 
-function FMIndex(seq, sa, σ, r)
-    wm = WaveletMatrix(make_bwt(seq, sa), log2(Int, σ))
-    # sample suffix array
-    samples, sampled = sample_sa(sa, r)
-    sentinel = something(findfirst(isequal(0), sa), 0) + 1
+function FMIndex(seq, suffixes, σ::Integer)
+    wm = WaveletMatrix(make_bwt(seq, suffixes), log2(Int, σ))
+    sentinel = something(findfirst(isequal(0), suffixes), 0) + 1
     # count characters
     count = count_bytes(seq, σ)
     count[1] = 1  # sentinel '$' is smaller than any character
     cumsum!(count, count)
-    return FMIndex(wm, sentinel, samples, SucVector(sampled), count)
+    return FMIndex(wm, sentinel, suffixes, count)
 end
 
 """
-    FMIndex(seq, σ=256; r=32, program=:SuffixArrays, mmap::Bool=false, opts...)
+    FMIndex(seq, σ)
 
 Build an FM-Index from a sequence `seq`.
 The sequence must support `convert(UInt, seq[i])` for each character and the
 alphabet size should be less than or equal to 256. The second parameter, `σ`, is
-the alphabet size. The third parameter, `r`, is the interval of sampling values
-from a suffix array. If you set it large, you can save the memory footprint but
-it requires more time to locate the position.
+the alphabet size.
 """
-function FMIndex(seq, σ=256; r=32, program=:SuffixArrays, mmap::Bool=false, opts...)
+function FMIndex(seq, σ::Integer=(maximum(seq) + 2))
     T = index_type(length(seq))
-    opts = Dict(opts)
-    @assert !haskey(opts, :σ) "σ should be passed as the second argument"
-    if program === :SuffixArrays
-        @assert 1 ≤ σ ≤ typemax(UInt) + 1
-        sa = make_sa(T, seq, σ, mmap)
-    elseif program === :psascan || program === :pSAscan
-        @assert 1 ≤ σ ≤ typemax(UInt)
-        psascan = get(opts, :psascan, "psascan")
-        workdir = get(opts, :workdir, pwd())
-        sa = make_sa_pscan(T, seq, psascan, workdir, mmap)
-    else
-        error("unknown program name: $program")
-    end
-    return FMIndex(seq, sa, σ, r)
+    @assert 1 ≤ σ ≤ typemax(UInt16) + 1
+    suffixes = make_sa(T, seq, σ)
+    return FMIndex(seq, suffixes, σ)
 end
 
 """
-    FMIndex(text; opts...)
+    FMIndex(text)
 
 Build an FM-Index from an ASCII text.
 """
-function FMIndex(text::Union{String,SubString{String}}; opts...)
-    return FMIndex(codeunits(text), 128; opts...)
+function FMIndex(text::Union{String,SubString{String}})
+    return FMIndex(codeunits(text), 128)
 end
 
 Base.length(index::FMIndex) = length(index.bwt)
-
-function Base.show(io::IO, fmindex::FMIndex)
-    println(io, summary(fmindex), ':')
-    totalsize = (
-        sizeof(fmindex.bwt) +
-        sizeof(fmindex.samples) +
-        sizeof(fmindex.sampled) +
-        sizeof(fmindex.count)
-    )
-    print("     length: ", length(fmindex), '\n')
-    print("  data size: ", Humanize.datasize(totalsize, style=:bin))
-end
 
 """
 Restore the original text from the index.
 """
 function restore(index::FMIndex)
     n = length(index)
-    text = Vector{UInt}(undef, n)
+    text = Vector{UInt16}(undef, n)
     p = index.sentinel
     while n > 0
         p = lfmap(index, p)
@@ -142,7 +114,7 @@ end
 function count_bytes(seq, σ)
     count = zeros(Int, σ + 1)
     for i in 1:length(seq)
-        count[convert(UInt, seq[i])+2] += 1
+        count[convert(UInt16, seq[i])+2] += 1
     end
     resize!(count, σ)
     return count
@@ -190,12 +162,7 @@ function sa_value(i::Int, index::FMIndex)
         # point to the sentinel '$'
         return length(index) + 1
     end
-    d = 0
-    @inbounds while !index.sampled[i-1]
-        i = lfmap(index, i)
-        d += 1
-    end
-    return index.samples[rank1(index.sampled, i - 1)] + d
+    return index.suffixes[i - 1]
 end
 
 sa_value(i::Integer, index::FMIndex) = sa_value(Int(i), index)
@@ -210,69 +177,16 @@ Base.size(seq::ByteSeq) = (length(seq.data),)
 @inline Base.getindex(seq::ByteSeq, i::Integer) = UInt(seq.data[i])
 
 # SuffixArrays.jl: https://github.com/quinnj/SuffixArrays.jl
-function make_sa(T, seq, σ, mmap)
+function make_sa(T, seq, σ)
     n = length(seq)
-    tmp_sa = mmap ? Mmap.mmap(Vector{Int}, n) : Vector{Int}(undef, n)
-    SuffixArrays.sais(ByteSeq(seq), tmp_sa, 0, n, nextpow(2, σ), false)
-    sa = mmap ? Mmap.mmap(Vector{T}, n) : Vector{T}(undef, n)
-    copyto!(sa, tmp_sa)
-    return sa
+    suffixes_temp = Vector{Int}(undef, n)
+    SuffixArrays.sais(ByteSeq(seq), suffixes_temp, 0, n, nextpow(2, σ), false)
+    suffixes = Vector{T}(undef, n)
+    copyto!(suffixes, suffixes_temp)
+    return suffixes
 end
-
-# pSAscan: https://www.cs.helsinki.fi/group/pads/pSAscan.html
-function make_sa_pscan(T, seq, psascan, workdir, mmap)
-    seqpath, io = mktemp(workdir)
-    sapath = string(seqpath, ".sa5")
-    try
-        dump_seq(io, seq)
-        run(`$psascan -o $sapath $seqpath`)
-        return load_sa(T, sapath, mmap)
-    catch
-        rethrow()
-    finally
-        rm(seqpath)
-        isfile(sapath) && rm(sapath)
-    end
-end
-
-function dump_seq(io, seq)
-    @inbounds for i in 1:length(seq)
-        write(io, convert(UInt, seq[i]))
-    end
-    close(io)
-end
-
-function load_sa(T, file, mmap)
-    # load a 40-bit suffix array generated from psascan
-    size = filesize(file)
-    @assert size % 5 == 0 "file $file is not 40-bit integers"
-    n = div(size, 5)
-    sa = mmap ? Mmap.mmap(Vector{T}, n) : Vector{T}(n)
-    open(file) do input
-        load_sa!(input, sa)
-    end
-    return sa
-end
-
-function load_sa!(input::IO, sa::Vector{T}) where {T}
-    # load a suffix array from the `input` into `sa`
-    buf = Vector{UInt}(undef, 5)
-    i = 0
-    while !eof(input)
-        read!(input, buf)
-        value = T(0)
-        @inbounds for j in 1:5
-            value |= convert(T, buf[j]) << (8 * (j - 1))
-        end
-        sa[i+=1] = value
-    end
-    @assert i == length(sa)
-    return sa
-end
-
 
 # other utils
-
 function index_type(n)
     n -= 1
     n ≤ typemax(UInt8) ? UInt8 :
@@ -280,27 +194,11 @@ function index_type(n)
     n ≤ typemax(UInt32) ? UInt32 : UInt64
 end
 
-# suffix array sampling
-function sample_sa(sa::Vector{T}, r) where {T}
-    n = length(sa)
-    samples = Vector{T}(undef, cld(n, r))
-    sampled = falses(n)
-    i′ = 0
-    for i in 1:n
-        @assert 0 ≤ sa[i] ≤ n - 1
-        if sa[i] % r == 0
-            samples[i′+=1] = sa[i]
-            sampled[i] = true
-        end
-    end
-    return samples, sampled
-end
-
 # Burrows-Wheeler Transform
 function make_bwt(seq, sa)
     n = length(seq)
     @assert length(sa) == n
-    ret = Vector{UInt}(undef, n)
+    ret = Vector{UInt16}(undef, n)
     j = 1
     for i in 1:n
         # note that `sa` starts from zero
@@ -314,9 +212,9 @@ function make_bwt(seq, sa)
     return ret
 end
 
-struct LocationIterator{w,T}
+struct LocationIterator{W}
     range::UnitRange{Int}
-    index::FMIndex{w,T}
+    index::FMIndex{W}
 end
 
 Base.length(iter::LocationIterator) = length(iter.range)

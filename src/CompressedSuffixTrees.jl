@@ -4,6 +4,33 @@ include("FMIndexes.jl")
 
 using .FMIndexes
 
+struct CompressedSuffixTree{W,T}
+    sequence::Vector{T}
+    fm_index::FMIndex{W,T}
+    lcps::Vector{Int}
+    rmq::RangMinQuery
+end
+
+function CompressedSuffixTree(text::String)
+    cus = collect(codeunits(text))
+    return CompressedSuffixTree(cus)
+end
+
+function build_cst(sequence::AbstractVector{T}) where {T<:Unsigned}
+    bwt, sa = bwt_sa(sequence)
+    fm_index = FMIndex(bwt)
+    # Extract the suffix array from FM-index (naive)
+    # For a real system, you'd avoid fully materializing SA, but we do it here for simplicity.
+    fullSA = sa # we already have it from sorting, no need to convert from fm
+    # Compute LCP
+    lcp = compute_lcp(vcat(t, UInt8('$')), fullSA)
+    # Build RMQ
+    rmq = RMQStructure(lcp)
+    CompressedSuffixTree(t, fm, fullSA, lcp, rmq)
+end
+
+
+
 """
 Kasai's algorithm for constructing the LCP array.
 Takes a string and its suffix array as input.
@@ -62,6 +89,5 @@ function contains(cst::CompressedSuffixTree{T}, pattern::Vector{T}) where {T}
     range = suffix_range(cst, pattern)
     return !isempty(range)
 end
-
 
 end # CompressedSuffixTrees
